@@ -1,9 +1,12 @@
 // ─── constants ───
 const STORAGE_KEY = "bucketList:v1";
+const PLACES_STORAGE_KEY = "placesList:v1";
 const EPIGRAPH_KEY = "bucketList:epigraph";
 const PREFS_KEY = "bucketList:prefs";
+const VIEW_KEY = "bucketList:view";
 const ROW_ID = 1;
-const ROMAN_MONTHS = ["i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x", "xi", "xii"];
+const DEFAULT_COUNTRY = "malaysia";
+const MONTHS_SHORT = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
 const OWNER_TOKENS = { me: "me", jaevan: "Jaevan", us: "us" };
 const OWNER_VALUES = new Set(["me", "Jaevan", "us"]);
 const PRIORITY_TOKENS = { high: "high", med: "medium", medium: "medium", low: "low" };
@@ -16,16 +19,31 @@ const AUTOSAVE_MS = 600;
 
 // ─── state ───
 const state = {
+  // shared
+  view: "list",         // "list" | "places"
+  supabase: null,
+  editMode: "local",    // "local" | "view" | "edit"
+
+  // list view
   items: [],
   filter: { kind: "all", value: null },
   sort: "grouped",
-  suggestionId: null,
-  supabase: null,
-  editMode: "local", // "local" | "view" | "edit"
   expanded: new Set(),
   lastRenderIds: new Set(),
+  suggestionId: null,
+  archiveOpen: false,
   pendingRemoteSave: null,
   lastSavedHash: "",
+
+  // places view
+  places: [],
+  drillCountry: null,
+  placesFilter: { kind: "all", value: null },
+  placesExpanded: new Set(),
+  placesLastRenderIds: new Set(),
+  placesArchiveOpen: false,
+  pendingRemoteSavePlaces: null,
+  lastSavedHashPlaces: "",
 };
 
 // ─── id helpers ───
@@ -224,7 +242,11 @@ async function toggleComplete(id) {
   if (!item) return;
   const wasComplete = Boolean(item.completedAt);
   item.completedAt = wasComplete ? null : new Date().toISOString();
-  if (!wasComplete) state.expanded.add(id);
+  if (!wasComplete) {
+    state.expanded.add(id);
+    state.archiveOpen = true;
+    savePrefs();
+  }
   await save();
   render();
   if (!wasComplete) focusReflection(id);
@@ -259,12 +281,7 @@ function isItemVisible(item) {
 function sortItems(items) {
   if (state.sort === "manual") return items.slice().sort((a, b) => a.order - b.order);
   if (state.sort === "added") return items.slice().sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-  if (state.sort === "alpha") return items.slice().sort((a, b) => a.title.localeCompare(b.title));
-  if (state.sort === "completed-last") {
-    return items.slice().sort((a, b) =>
-      Number(!!a.completedAt) - Number(!!b.completedAt) || a.order - b.order
-    );
-  }
+  if (state.sort === "alpha") return items.slice().sort((a, b) => (a.title ?? a.name).localeCompare(b.title ?? b.name));
   return items.slice().sort((a, b) =>
     PRIORITY_ORDER[a.priority] - PRIORITY_ORDER[b.priority] || a.order - b.order
   );
@@ -286,8 +303,9 @@ function allTags() {
 // ─── render: list ───
 function formatRomanDate(iso) {
   const d = new Date(iso);
-  return `${ROMAN_MONTHS[d.getMonth()]}.${d.getFullYear()}`;
+  return `${MONTHS_SHORT[d.getMonth()]} ${String(d.getFullYear()).slice(-2)}`;
 }
+const formatDate = formatRomanDate;
 
 function renderTagsInto(container, tags) {
   container.replaceChildren();
@@ -357,7 +375,7 @@ function buildItemNode(item, index) {
   const node = tmpl.content.firstElementChild.cloneNode(true);
   fillItemNode(node, item, index);
   if (!state.lastRenderIds.has(item.id)) node.classList.add("is-entering");
-  if (!canEdit()) node.draggable = false;
+  if (!canEdit() || item.completedAt) node.draggable = false;
   return node;
 }
 
@@ -371,11 +389,30 @@ function renderGroupHeader(label) {
 function renderList() {
   const listEl = document.getElementById("list");
   const visible = state.items.filter(isItemVisible);
-  const sorted = sortItems(visible);
-  document.getElementById("empty").hidden = state.items.length > 0;
+  const active = visible.filter(i => !i.completedAt);
+  const archived = visible.filter(i => i.completedAt);
+  const sorted = sortItems(active);
+  document.getElementById("empty").hidden = state.items.length > 0 || archived.length > 0;
   listEl.innerHTML = "";
   if (state.sort === "grouped") renderGrouped(listEl, sorted);
   else sorted.forEach((item, i) => listEl.appendChild(buildItemNode(item, i)));
+  renderArchive(archived);
+}
+
+function renderArchive(archived) {
+  const wrap = document.getElementById("archive");
+  const listEl = document.getElementById("archive-list");
+  const toggle = document.getElementById("archive-toggle");
+  listEl.replaceChildren();
+  if (!archived.length) { wrap.hidden = true; return; }
+  wrap.hidden = false;
+  document.getElementById("archive-count").textContent = String(archived.length);
+  toggle.setAttribute("aria-expanded", String(state.archiveOpen));
+  listEl.hidden = !state.archiveOpen;
+  const ordered = archived.slice().sort((a, b) =>
+    (b.completedAt ?? "").localeCompare(a.completedAt ?? "")
+  );
+  ordered.forEach((item, i) => listEl.appendChild(buildItemNode(item, i)));
 }
 
 function renderGrouped(listEl, sorted) {
@@ -431,6 +468,11 @@ function renderStats() {
 }
 
 function render() {
+  if (state.view === "places") return renderPlacesView();
+  renderListView();
+}
+
+function renderListView() {
   pruneStaleSuggestion();
   pruneStaleExpanded();
   const first = captureRects();
@@ -503,15 +545,28 @@ function handleAddSubmit(e) {
   const input = document.getElementById("add-input");
   const raw = input.value;
   if (!raw.trim()) return;
-  addItem(raw);
+  if (state.view === "places") addPlace(raw);
+  else addItem(raw);
   input.value = "";
   highlightDuplicate("");
+  document.getElementById("composer-hint").hidden = true;
 }
 
 function handleAddInput(e) {
   const v = e.target.value;
   const hint = document.getElementById("composer-hint");
   if (!v) { hint.hidden = true; highlightDuplicate(""); return; }
+  if (state.view === "places") {
+    const parsed = parsePlace(v);
+    const parts = [];
+    parts.push(parsed.country);
+    if (parsed.owner !== "me") parts.push(parsed.owner);
+    if (parsed.priority !== "low") parts.push(parsed.priority);
+    parsed.tags.forEach(t => parts.push(`#${t}`));
+    hint.textContent = parts.join(" · ");
+    hint.hidden = false;
+    return;
+  }
   const parsed = parseInput(v);
   const parts = [];
   if (parsed.owner !== "me") parts.push(parsed.owner);
@@ -738,13 +793,12 @@ function showSuggestion() {
 }
 
 // ─── sort cycling ───
-const SORT_MODES = ["grouped", "manual", "added", "alpha", "completed-last"];
+const SORT_MODES = ["grouped", "manual", "added", "alpha"];
 const SORT_LABELS = {
   grouped: "grouped",
   manual: "manual",
   added: "by date added",
   alpha: "alphabetical",
-  "completed-last": "completed last",
 };
 
 function syncSortLabel() {
@@ -767,11 +821,20 @@ function loadPrefs() {
     const p = JSON.parse(raw);
     if (SORT_MODES.includes(p.sort)) state.sort = p.sort;
     if (p.filter && typeof p.filter === "object") state.filter = p.filter;
+    if (typeof p.archiveOpen === "boolean") state.archiveOpen = p.archiveOpen;
+    if (typeof p.placesArchiveOpen === "boolean") state.placesArchiveOpen = p.placesArchiveOpen;
+    if (p.placesFilter && typeof p.placesFilter === "object") state.placesFilter = p.placesFilter;
   } catch {}
 }
 
 function savePrefs() {
-  localStorage.setItem(PREFS_KEY, JSON.stringify({ sort: state.sort, filter: state.filter }));
+  localStorage.setItem(PREFS_KEY, JSON.stringify({
+    sort: state.sort,
+    filter: state.filter,
+    archiveOpen: state.archiveOpen,
+    placesArchiveOpen: state.placesArchiveOpen,
+    placesFilter: state.placesFilter,
+  }));
 }
 
 // ─── inline status messages ───
@@ -930,7 +993,639 @@ function subscribeRemoteChanges() {
       await loadItems();
       render();
     })
+    .on("postgres_changes", { event: "*", schema: "public", table: "places_list" }, async (payload) => {
+      const remoteHash = hashItems(sanitizePlaces(payload?.new?.payload?.items));
+      if (remoteHash === state.lastSavedHashPlaces) return;
+      await loadPlaces();
+      render();
+    })
     .subscribe();
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// PLACES MODE
+// ═══════════════════════════════════════════════════════════════════
+
+// ─── places: parser ───
+function parseCountry(raw) {
+  let country = null;
+  const cleaned = raw.replace(/@([\p{L}\p{N}-]+)/gu, (_, t) => {
+    country = t.toLowerCase().replace(/-/g, " ").trim();
+    return "";
+  });
+  return { cleaned, country };
+}
+
+function parsePlace(raw) {
+  const a = parsePriority(raw);
+  const b = parseCountry(a.cleaned);
+  const c = parseTags(b.cleaned);
+  const fallback = state.drillCountry || DEFAULT_COUNTRY;
+  return {
+    name: c.cleaned.replace(/\s+/g, " ").trim(),
+    country: b.country || fallback,
+    owner: c.owner,
+    priority: a.priority,
+    tags: [...new Set(c.tags)],
+  };
+}
+
+// ─── places: storage ───
+function loadPlacesLocal() {
+  try {
+    const raw = localStorage.getItem(PLACES_STORAGE_KEY);
+    if (!raw) return [];
+    return JSON.parse(raw).items ?? [];
+  } catch { return []; }
+}
+
+function savePlacesLocal(places) {
+  const payload = { items: places, savedAt: new Date().toISOString() };
+  localStorage.setItem(PLACES_STORAGE_KEY, JSON.stringify(payload));
+}
+
+async function loadPlacesRemote() {
+  const { data, error } = await state.supabase
+    .from("places_list").select("payload").eq("id", ROW_ID).maybeSingle();
+  if (error || !data?.payload) return [];
+  return data.payload.items ?? [];
+}
+
+async function savePlacesRemote(places) {
+  const payload = { items: places, savedAt: new Date().toISOString() };
+  state.lastSavedHashPlaces = hashItems(places);
+  await state.supabase
+    .from("places_list")
+    .upsert({ id: ROW_ID, payload, updated_at: new Date().toISOString() });
+}
+
+async function savePlaces() {
+  if (!isRemote()) { savePlacesLocal(state.places); return; }
+  if (state.editMode !== "edit") return;
+  state.lastSavedHashPlaces = hashItems(state.places);
+  if (state.pendingRemoteSavePlaces) clearTimeout(state.pendingRemoteSavePlaces);
+  state.pendingRemoteSavePlaces = setTimeout(() => {
+    state.pendingRemoteSavePlaces = null;
+    savePlacesRemote(state.places).catch(() => showStatus("save failed; will retry"));
+  }, AUTOSAVE_MS);
+}
+
+async function flushPendingSavePlaces() {
+  if (!state.pendingRemoteSavePlaces) return;
+  clearTimeout(state.pendingRemoteSavePlaces);
+  state.pendingRemoteSavePlaces = null;
+  await savePlacesRemote(state.places).catch(() => {});
+}
+
+async function loadPlaces() {
+  const raw = isRemote() ? await loadPlacesRemote() : loadPlacesLocal();
+  state.places = sanitizePlaces(raw);
+  state.lastSavedHashPlaces = hashItems(state.places);
+}
+
+// ─── places: sanitize ───
+function sanitizePlace(raw, fallbackOrder) {
+  if (!raw || typeof raw !== "object") return null;
+  const name = sanitizeString(raw.name, 280).replace(/\s+/g, " ").trim();
+  if (!name) return null;
+  const country = sanitizeString(raw.country, 80).toLowerCase().replace(/\s+/g, " ").trim() || DEFAULT_COUNTRY;
+  return {
+    id: sanitizeString(raw.id, 40) || newId(),
+    name, country,
+    city: sanitizeString(raw.city, 100),
+    address: sanitizeString(raw.address, 500),
+    owner: OWNER_VALUES.has(raw.owner) ? raw.owner : "me",
+    priority: PRIORITY_VALUES.has(raw.priority) ? raw.priority : "low",
+    tags: sanitizeTags(raw.tags),
+    notes: sanitizeString(raw.notes, 4000),
+    coverUrl: sanitizeUrl(raw.coverUrl),
+    reflection: sanitizeString(raw.reflection, 280),
+    visitedAt: typeof raw.visitedAt === "string" ? raw.visitedAt : null,
+    createdAt: typeof raw.createdAt === "string" ? raw.createdAt : new Date().toISOString(),
+    order: typeof raw.order === "number" ? raw.order : fallbackOrder,
+  };
+}
+
+function sanitizePlaces(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((p, i) => sanitizePlace(p, i)).filter(Boolean);
+}
+
+// ─── places: CRUD ───
+function makePlace(raw) {
+  const parsed = parsePlace(raw);
+  if (!parsed.name) return null;
+  return {
+    id: newId(),
+    name: parsed.name,
+    country: parsed.country,
+    city: "",
+    address: "",
+    owner: parsed.owner,
+    priority: parsed.priority,
+    tags: parsed.tags,
+    notes: "",
+    coverUrl: "",
+    reflection: "",
+    visitedAt: null,
+    createdAt: new Date().toISOString(),
+    order: state.places.length,
+  };
+}
+
+async function addPlace(raw) {
+  const place = makePlace(raw);
+  if (!place) return;
+  state.places.push(place);
+  await savePlaces();
+  render();
+}
+
+async function updatePlace(id, patch) {
+  const place = state.places.find(p => p.id === id);
+  if (!place) return;
+  Object.assign(place, patch);
+  await savePlaces();
+}
+
+async function deletePlace(id) {
+  state.places = state.places.filter(p => p.id !== id);
+  await savePlaces();
+  render();
+}
+
+async function togglePlaceVisited(id) {
+  const place = state.places.find(p => p.id === id);
+  if (!place) return;
+  const wasVisited = Boolean(place.visitedAt);
+  place.visitedAt = wasVisited ? null : new Date().toISOString();
+  if (!wasVisited) {
+    state.placesExpanded.add(id);
+    state.placesArchiveOpen = true;
+    savePrefs();
+  }
+  await savePlaces();
+  render();
+  if (!wasVisited) focusPlaceReflection(id);
+}
+
+function focusPlaceReflection(id) {
+  requestAnimationFrame(() => {
+    const node = document.querySelector(`#places-archive-list .item[data-id="${id}"] .reflection, #places-list .item[data-id="${id}"] .reflection`);
+    if (node) node.focus();
+  });
+}
+
+// ─── places: filtering / sorting ───
+function isPlaceVisible(place) {
+  const f = state.placesFilter;
+  if (f.kind === "all") return true;
+  if (f.kind === "owner") return place.owner === f.value;
+  if (f.kind === "tag") return place.tags.includes(f.value);
+  return true;
+}
+
+function sortPlaces(places) {
+  if (state.sort === "manual") return places.slice().sort((a, b) => a.order - b.order);
+  if (state.sort === "added") return places.slice().sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  if (state.sort === "alpha") return places.slice().sort((a, b) => a.name.localeCompare(b.name));
+  return places.slice().sort((a, b) =>
+    PRIORITY_ORDER[a.priority] - PRIORITY_ORDER[b.priority] || a.order - b.order
+  );
+}
+
+function placesTagsAll() {
+  const seen = new Set();
+  state.places.forEach(p => p.tags.forEach(t => seen.add(t)));
+  return [...seen].sort();
+}
+
+// ─── places: constellation ───
+function aggregateCountries() {
+  const map = new Map();
+  state.places.forEach(p => {
+    if (!map.has(p.country)) map.set(p.country, { name: p.country, count: 0, visited: 0 });
+    const e = map.get(p.country);
+    e.count++;
+    if (p.visitedAt) e.visited++;
+  });
+  return [...map.values()].sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+}
+
+function hashStr(s) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = ((h * 31) + s.charCodeAt(i)) | 0;
+  return Math.abs(h);
+}
+
+function constellationPosition(name) {
+  const h = hashStr(name);
+  return {
+    x: 12 + (h % 76),
+    y: 14 + ((Math.floor(h / 7)) % 72),
+  };
+}
+
+function renderConstellation() {
+  document.getElementById("constellation-wrap").hidden = false;
+  document.getElementById("country-drill").hidden = true;
+  const wrap = document.getElementById("constellation");
+  const countries = aggregateCountries();
+  wrap.replaceChildren();
+  document.getElementById("places-empty").hidden = countries.length > 0;
+  countries.forEach(c => wrap.appendChild(buildStar(c)));
+}
+
+function buildStar(country) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "star";
+  btn.textContent = country.name;
+  const count = document.createElement("span");
+  count.className = "star-count";
+  count.textContent = country.count;
+  btn.appendChild(count);
+  const pos = constellationPosition(country.name);
+  btn.style.left = `${pos.x}%`;
+  btn.style.top = `${pos.y}%`;
+  const size = 1.05 + Math.min(0.85, Math.log(country.count + 1) * 0.45);
+  btn.style.fontSize = `${size}rem`;
+  if (country.count > 0 && country.visited === country.count) btn.style.opacity = "0.5";
+  btn.addEventListener("click", () => drillIn(country.name));
+  return btn;
+}
+
+// ─── places: country drill ───
+function renderCountryDrill() {
+  document.getElementById("constellation-wrap").hidden = true;
+  document.getElementById("country-drill").hidden = false;
+  const country = state.drillCountry;
+  const all = state.places.filter(p => p.country === country);
+  document.getElementById("country-title").textContent = `${country}.`;
+  document.getElementById("country-meta").textContent =
+    `${all.length} place${all.length === 1 ? "" : "s"} · ${all.filter(p => p.visitedAt).length} visited`;
+  const visible = all.filter(isPlaceVisible);
+  const active = visible.filter(p => !p.visitedAt);
+  const archived = visible.filter(p => p.visitedAt);
+  const sorted = sortPlaces(active);
+  const listEl = document.getElementById("places-list");
+  listEl.replaceChildren();
+  if (state.sort === "grouped") renderGroupedPlaces(listEl, sorted);
+  else sorted.forEach((p, i) => listEl.appendChild(buildPlaceNode(p, i)));
+  document.getElementById("country-empty").hidden = active.length > 0 || archived.length > 0;
+  renderPlacesArchive(archived);
+  renderPlacesTagChips();
+  syncPlacesActiveChip();
+  state.placesLastRenderIds = new Set(state.places.map(p => p.id));
+}
+
+function renderGroupedPlaces(listEl, sorted) {
+  const groups = { high: [], medium: [], low: [] };
+  sorted.forEach(p => groups[p.priority].push(p));
+  let n = 0;
+  ["high", "medium", "low"].forEach(p => {
+    if (!groups[p].length) return;
+    listEl.appendChild(renderGroupHeader(PRIORITY_LABEL[p]));
+    groups[p].forEach(place => { listEl.appendChild(buildPlaceNode(place, n)); n++; });
+  });
+}
+
+function renderPlacesArchive(archived) {
+  const wrap = document.getElementById("places-archive");
+  const listEl = document.getElementById("places-archive-list");
+  const toggle = document.getElementById("places-archive-toggle");
+  listEl.replaceChildren();
+  if (!archived.length) { wrap.hidden = true; return; }
+  wrap.hidden = false;
+  document.getElementById("places-archive-count").textContent = String(archived.length);
+  toggle.setAttribute("aria-expanded", String(state.placesArchiveOpen));
+  listEl.hidden = !state.placesArchiveOpen;
+  const ordered = archived.slice().sort((a, b) =>
+    (b.visitedAt ?? "").localeCompare(a.visitedAt ?? "")
+  );
+  ordered.forEach((p, i) => listEl.appendChild(buildPlaceNode(p, i)));
+}
+
+function renderPlacesTagChips() {
+  const wrap = document.getElementById("places-tag-chips");
+  wrap.replaceChildren();
+  const country = state.drillCountry;
+  const inCountry = country ? state.places.filter(p => p.country === country) : state.places;
+  const tags = [...new Set(inCountry.flatMap(p => p.tags))].sort();
+  tags.forEach(t => {
+    const b = document.createElement("button");
+    b.className = "chip";
+    b.dataset.filter = "tag";
+    b.dataset.value = t;
+    b.textContent = `#${t}`;
+    if (state.placesFilter.kind === "tag" && state.placesFilter.value === t) b.classList.add("is-active");
+    wrap.appendChild(b);
+  });
+}
+
+function syncPlacesActiveChip() {
+  document.querySelectorAll("#places-filters .chip").forEach(chip => {
+    const matches = state.placesFilter.kind === chip.dataset.filter &&
+      (state.placesFilter.value ?? "all") === (chip.dataset.value ?? "all");
+    chip.classList.toggle("is-active", matches);
+  });
+}
+
+function renderPlacesStats() {
+  const all = state.places;
+  const visited = all.filter(p => p.visitedAt).length;
+  const countries = new Set(all.map(p => p.country)).size;
+  document.getElementById("count").textContent =
+    `${all.length} place${all.length === 1 ? "" : "s"} across ${countries} ${countries === 1 ? "country" : "countries"}`;
+  document.getElementById("percent").textContent = `${visited} visited`;
+  const pct = all.length ? Math.round((visited / all.length) * 100) : 0;
+  document.getElementById("bar-fill").style.width = `${pct}%`;
+  const me = all.filter(p => p.owner === "me").length;
+  const jv = all.filter(p => p.owner === "Jaevan").length;
+  const us = all.filter(p => p.owner === "us").length;
+  document.getElementById("substats").textContent = `me ${me} / Jaevan ${jv} / us ${us}`;
+}
+
+function renderPlacesView() {
+  if (state.drillCountry) renderCountryDrill();
+  else renderConstellation();
+  renderPlacesStats();
+}
+
+// ─── places: node ───
+function buildPlaceNode(place, index) {
+  const tmpl = document.getElementById("place-template");
+  const node = tmpl.content.firstElementChild.cloneNode(true);
+  fillPlaceNode(node, place, index);
+  if (!state.placesLastRenderIds.has(place.id)) node.classList.add("is-entering");
+  if (!canEdit() || place.visitedAt) node.draggable = false;
+  return node;
+}
+
+function fillPlaceNode(node, place, index) {
+  node.dataset.id = place.id;
+  node.dataset.priority = place.priority;
+  node.dataset.owner = place.owner;
+  node.classList.toggle("is-complete", Boolean(place.visitedAt));
+  node.classList.toggle("is-expanded", state.placesExpanded.has(place.id));
+  node.querySelector(".number").textContent = String(index + 1).padStart(2, "0");
+  const titleEl = node.querySelector(".title");
+  titleEl.textContent = place.name;
+  titleEl.contentEditable = canEdit() ? "true" : "false";
+  node.querySelector(".owner").textContent = place.owner;
+  renderTagsInto(node.querySelector(".tag-list"), place.tags);
+  node.querySelector(".marginalia").textContent = place.visitedAt ? formatDate(place.visitedAt) : "";
+  fillPlaceAddress(node, place);
+  fillPlaceDetail(node, place);
+}
+
+function fillPlaceAddress(node, place) {
+  const row = node.querySelector(".address-row");
+  const link = node.querySelector(".address-link");
+  const text = node.querySelector(".address-text");
+  const query = (place.address || `${place.name} ${place.country}`).trim();
+  if (!query) { row.hidden = true; return; }
+  row.hidden = false;
+  link.href = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}`;
+  text.textContent = place.address || "find on maps";
+}
+
+function fillPlaceDetail(node, place) {
+  const detail = node.querySelector(".detail");
+  detail.hidden = !state.placesExpanded.has(place.id);
+  const notes = node.querySelector(".notes");
+  notes.value = place.notes ?? "";
+  notes.readOnly = !canEdit();
+  const cover = node.querySelector(".cover-url");
+  cover.value = place.coverUrl ?? "";
+  cover.readOnly = !canEdit();
+  const addr = node.querySelector(".address-input");
+  addr.value = place.address ?? "";
+  addr.readOnly = !canEdit();
+  const coverEl = node.querySelector(".cover");
+  const safe = sanitizeUrl(place.coverUrl);
+  if (safe) {
+    coverEl.hidden = false;
+    coverEl.style.backgroundImage = `url("${encodeURI(safe)}")`;
+  } else { coverEl.hidden = true; coverEl.style.backgroundImage = ""; }
+  fillPlaceReflection(node, place);
+}
+
+function fillPlaceReflection(node, place) {
+  const r = node.querySelector(".reflection");
+  const shown = node.querySelector(".reflection-shown");
+  if (place.visitedAt) {
+    r.hidden = Boolean(place.reflection);
+    r.value = place.reflection ?? "";
+    shown.hidden = !place.reflection;
+    shown.textContent = place.reflection ? `"${place.reflection}"` : "";
+  } else { r.hidden = true; shown.hidden = true; }
+}
+
+// ─── places: events ───
+function handlePlacesClick(e) {
+  if (e.target.closest(".address-link")) return;
+  const tagBtn = e.target.closest(".tag");
+  if (tagBtn?.dataset.tag) { filterPlaceByTag(tagBtn.dataset.tag); return; }
+  const item = e.target.closest(".item");
+  if (!item) return;
+  const id = item.dataset.id;
+  if (e.target.closest(".check")) return handlePlaceVisit(id);
+  if (e.target.closest(".expand")) return handlePlaceExpand(id);
+  if (e.target.closest(".delete")) return handlePlaceDelete(id);
+  if (e.target.closest(".priority-cycle")) return handlePlacePriorityCycle(id);
+  if (e.target.closest(".owner-cycle")) return handlePlaceOwnerCycle(id);
+  if (e.target.closest(".country-cycle")) return handlePlaceCountryCycle(id);
+}
+
+function handlePlaceVisit(id) { if (canEdit()) togglePlaceVisited(id); }
+
+function handlePlaceExpand(id) {
+  if (state.placesExpanded.has(id)) state.placesExpanded.delete(id);
+  else state.placesExpanded.add(id);
+  render();
+}
+
+function handlePlaceDelete(id) { if (canEdit()) deletePlace(id); }
+
+async function handlePlacePriorityCycle(id) {
+  if (!canEdit()) return;
+  const place = state.places.find(p => p.id === id);
+  if (!place) return;
+  await updatePlace(id, { priority: cyclePriority(place.priority) });
+  render();
+}
+
+async function handlePlaceOwnerCycle(id) {
+  if (!canEdit()) return;
+  const place = state.places.find(p => p.id === id);
+  if (!place) return;
+  await updatePlace(id, { owner: cycleOwner(place.owner) });
+  render();
+}
+
+async function handlePlaceCountryCycle(id) {
+  if (!canEdit()) return;
+  const place = state.places.find(p => p.id === id);
+  if (!place) return;
+  const next = prompt("move to which country?", place.country);
+  if (!next) return;
+  const cleaned = sanitizeString(next, 80).toLowerCase().trim();
+  if (!cleaned) return;
+  await updatePlace(id, { country: cleaned });
+  render();
+}
+
+function handlePlaceFilterClick(e) {
+  const chip = e.target.closest(".chip");
+  if (!chip) return;
+  const kind = chip.dataset.filter;
+  const value = chip.dataset.value;
+  const same = state.placesFilter.kind === kind && (state.placesFilter.value ?? "all") === (value ?? "all");
+  if (same && kind !== "all") state.placesFilter = { kind: "all", value: null };
+  else state.placesFilter = { kind, value: kind === "all" ? null : value };
+  savePrefs();
+  render();
+}
+
+function filterPlaceByTag(tag) {
+  state.placesFilter = { kind: "tag", value: tag };
+  savePrefs();
+  render();
+}
+
+function handlePlaceInlineBlur(e) {
+  const item = e.target.closest(".item");
+  if (!item) return;
+  const id = item.dataset.id;
+  if (e.target.classList.contains("title")) savePlaceName(id, e.target);
+  if (e.target.classList.contains("cover-url")) handlePlaceCoverUrlBlur(id, e.target);
+  if (e.target.classList.contains("reflection")) handlePlaceReflectionBlur(id, e.target);
+  if (e.target.classList.contains("address-input")) handlePlaceAddressBlur(id, e.target);
+}
+
+function handlePlaceInlineInput(e) {
+  if (!canEdit()) return;
+  const item = e.target.closest(".item");
+  if (!item) return;
+  const id = item.dataset.id;
+  if (e.target.classList.contains("notes")) updatePlace(id, { notes: sanitizeString(e.target.value, 4000) });
+  if (e.target.classList.contains("title")) {
+    const next = sanitizeString(e.target.textContent, 280).replace(/\s+/g, " ").trim();
+    if (next) updatePlace(id, { name: next });
+  }
+}
+
+function savePlaceName(id, el) {
+  if (!canEdit()) return;
+  const next = sanitizeString(el.textContent, 280).replace(/\s+/g, " ").trim();
+  if (!next) { deletePlace(id); return; }
+  updatePlace(id, { name: next });
+}
+
+function handlePlaceCoverUrlBlur(id, el) {
+  if (!canEdit()) return;
+  updatePlace(id, { coverUrl: sanitizeUrl(el.value) });
+  render();
+}
+
+function handlePlaceReflectionBlur(id, el) {
+  if (!canEdit()) return;
+  updatePlace(id, { reflection: el.value.trim() });
+  const node = document.querySelector(`.item[data-id="${id}"]`);
+  const place = state.places.find(p => p.id === id);
+  if (node && place) fillPlaceReflection(node, place);
+}
+
+function handlePlaceAddressBlur(id, el) {
+  if (!canEdit()) return;
+  updatePlace(id, { address: el.value.trim() });
+  const node = document.querySelector(`.item[data-id="${id}"]`);
+  const place = state.places.find(p => p.id === id);
+  if (node && place) { fillPlaceAddress(node, place); fillPlaceDetail(node, place); }
+}
+
+// ─── view router ───
+function loadView() {
+  const saved = localStorage.getItem(VIEW_KEY);
+  if (saved === "list" || saved === "places") state.view = saved;
+}
+
+function saveView() { localStorage.setItem(VIEW_KEY, state.view); }
+
+function switchView(view) {
+  if (state.view === view) return;
+  state.view = view;
+  saveView();
+  applyViewToUi();
+  render();
+}
+
+function applyViewToUi() {
+  document.getElementById("view-list").hidden = state.view !== "list";
+  document.getElementById("view-places").hidden = state.view !== "places";
+  document.querySelectorAll(".view-tab").forEach(t => {
+    t.classList.toggle("is-active", t.dataset.view === state.view);
+  });
+  updateComposerPlaceholder();
+  syncSortLabel();
+}
+
+function updateComposerPlaceholder() {
+  const input = document.getElementById("add-input");
+  if (state.view === "places") {
+    if (state.drillCountry) input.placeholder = `a spot in ${state.drillCountry}…  try  #cafe`;
+    else input.placeholder = "somewhere you'd like to go…  try  @japan  #cafe";
+  } else {
+    input.placeholder = "something you'd like to do…  try  #me  #jaevan  !high";
+  }
+}
+
+function drillIn(country) {
+  state.drillCountry = country;
+  state.placesFilter = { kind: "all", value: null };
+  updateComposerPlaceholder();
+  render();
+}
+
+function drillOut() {
+  state.drillCountry = null;
+  updateComposerPlaceholder();
+  render();
+}
+
+// ─── archive toggles ───
+function toggleArchive() {
+  state.archiveOpen = !state.archiveOpen;
+  savePrefs();
+  render();
+}
+
+function togglePlacesArchive() {
+  state.placesArchiveOpen = !state.placesArchiveOpen;
+  savePrefs();
+  render();
+}
+
+// ─── suggestion adapted for places ───
+function pickPlaceSuggestion() {
+  const pool = state.places.filter(p => !p.visitedAt);
+  if (!pool.length) return null;
+  return pool[Math.floor(Math.random() * pool.length)];
+}
+
+function showSuggestionForView() {
+  if (state.view === "places") {
+    const place = pickPlaceSuggestion();
+    const box = document.getElementById("suggestion");
+    if (!place) { box.hidden = true; return; }
+    box.hidden = false;
+    box.querySelector(".suggestion-label").textContent = "for today, consider going to —";
+    box.querySelector(".suggestion-item").textContent = `${place.name}, ${place.country}`;
+  } else {
+    document.getElementById("suggestion").querySelector(".suggestion-label").textContent = "for today, consider —";
+    showSuggestion();
+  }
 }
 
 // ─── wiring ───
@@ -938,8 +1633,10 @@ function bindEvents() {
   document.getElementById("add-form").addEventListener("submit", handleAddSubmit);
   document.getElementById("add-input").addEventListener("input", handleAddInput);
   document.getElementById("filters").addEventListener("click", handleFilterClick);
+  document.getElementById("places-filters").addEventListener("click", handlePlaceFilterClick);
   bindList();
-  document.getElementById("today-link").addEventListener("click", showSuggestion);
+  bindPlacesList();
+  document.getElementById("today-link").addEventListener("click", showSuggestionForView);
   document.getElementById("sort-link").addEventListener("click", cycleSort);
   document.getElementById("export-link").addEventListener("click", downloadJson);
   document.getElementById("import-link").addEventListener("click", () => document.getElementById("import-file").click());
@@ -947,12 +1644,37 @@ function bindEvents() {
   document.getElementById("gate-link").addEventListener("click", handleGateLink);
   document.getElementById("gate-form").addEventListener("submit", handleGateSubmit);
   document.getElementById("gate-cancel").addEventListener("click", handleGateCancel);
+  document.getElementById("view-tabs").addEventListener("click", e => {
+    const tab = e.target.closest(".view-tab");
+    if (tab) switchView(tab.dataset.view);
+  });
+  document.getElementById("drill-back").addEventListener("click", drillOut);
+  document.getElementById("archive-toggle").addEventListener("click", toggleArchive);
+  document.getElementById("places-archive-toggle").addEventListener("click", togglePlacesArchive);
   document.addEventListener("keydown", handleGlobalKeydown);
-  window.addEventListener("beforeunload", () => flushPendingSave());
+  window.addEventListener("beforeunload", () => { flushPendingSave(); flushPendingSavePlaces(); });
+}
+
+function bindPlacesList() {
+  const lists = ["places-list", "places-archive-list"];
+  lists.forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener("click", handlePlacesClick);
+    el.addEventListener("blur", handlePlaceInlineBlur, true);
+    el.addEventListener("input", handlePlaceInlineInput, true);
+    el.addEventListener("keydown", handleInlineKeydown, true);
+    el.addEventListener("paste", handlePaste, true);
+  });
 }
 
 function bindList() {
-  const list = document.getElementById("list");
+  ["list", "archive-list"].forEach(id => bindOneItemList(id));
+}
+
+function bindOneItemList(id) {
+  const list = document.getElementById(id);
+  if (!list) return;
   list.addEventListener("click", handleListClick);
   list.addEventListener("dragstart", handleDragStart);
   list.addEventListener("dragover", handleDragOver);
@@ -980,14 +1702,15 @@ function handleGlobalKeydown(e) {
 // ─── boot ───
 async function boot() {
   loadPrefs();
+  loadView();
   state.supabase = await setupSupabase();
   await syncEditModeFromSession();
   applyEditModeUi();
-  syncSortLabel();
+  applyViewToUi();
   loadEpigraph();
   bindEpigraph();
   bindEvents();
-  await loadItems();
+  await Promise.all([loadItems(), loadPlaces()]);
   render();
   subscribeRemoteChanges();
 }
