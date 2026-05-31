@@ -40,6 +40,7 @@
           spellcheck="false">
       </form>
       <p class="composer-hint" id="composer-hint" hidden></p>
+      <div class="composer-suggest" id="composer-suggest" hidden role="listbox" aria-label="location suggestions"></div>
     </section>
 
     <div class="view" id="view-list">
@@ -54,7 +55,10 @@
 
       <ol class="list" id="list"></ol>
 
-      <p class="empty" id="empty" hidden><em>your list is empty. add one above.</em></p>
+      <div class="empty" id="empty" hidden>
+        <p class="empty-headline">the page is blank.</p>
+        <p class="empty-hint">try writing <code class="empty-example">read a poem every morning</code> in the field above.</p>
+      </div>
 
       <section class="archive" id="archive" hidden>
         <button class="archive-toggle" id="archive-toggle" type="button" aria-expanded="false">
@@ -68,9 +72,12 @@
 
     <div class="view" id="view-places" hidden>
       <div class="constellation-wrap" id="constellation-wrap">
-        <p class="places-overline">the world, as i want to know it.</p>
-        <div class="constellation" id="constellation" role="navigation" aria-label="countries"></div>
-        <p class="places-empty" id="places-empty" hidden><em>no places yet — add one above. malaysia is the default.</em></p>
+        <p class="places-overline">places to go</p>
+        <ol class="country-index" id="country-index" role="navigation" aria-label="countries"></ol>
+        <div class="places-empty" id="places-empty" hidden>
+          <p class="empty-headline">no places yet.</p>
+          <p class="empty-hint">try <code class="empty-example">kopi roti #cafe</code> for somewhere local, or <code class="empty-example">fuglen tokyo @japan.tokyo</code> for somewhere far.</p>
+        </div>
       </div>
 
       <div class="country-drill" id="country-drill" hidden>
@@ -86,7 +93,10 @@
           <span class="tag-chips" id="places-tag-chips"></span>
         </nav>
         <ol class="list" id="places-list"></ol>
-        <p class="empty" id="country-empty" hidden><em>nothing here yet.</em></p>
+        <div class="empty" id="country-empty" hidden>
+          <p class="empty-headline">nothing matches.</p>
+          <p class="empty-hint">try clearing a filter above, or add something new.</p>
+        </div>
 
         <section class="archive" id="places-archive" hidden>
           <button class="archive-toggle" id="places-archive-toggle" type="button" aria-expanded="false">

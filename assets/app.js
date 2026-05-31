@@ -37,6 +37,7 @@ const state = {
 
   // places view
   places: [],
+  locations: { countries: [], cities: {} },
   drillCountry: null,
   placesFilter: { kind: "all", value: null },
   placesExpanded: new Set(),
@@ -550,21 +551,25 @@ function handleAddSubmit(e) {
   input.value = "";
   highlightDuplicate("");
   document.getElementById("composer-hint").hidden = true;
+  hideSuggestStrip();
 }
 
 function handleAddInput(e) {
   const v = e.target.value;
   const hint = document.getElementById("composer-hint");
-  if (!v) { hint.hidden = true; highlightDuplicate(""); return; }
+  if (!v) { hint.hidden = true; highlightDuplicate(""); hideSuggestStrip(); return; }
   if (state.view === "places") {
     const parsed = parsePlace(v);
-    const parts = [];
-    parts.push(parsed.country);
+    const segs = [parsed.country];
+    if (parsed.city) segs.push(parsed.city);
+    if (parsed.district) segs.push(parsed.district);
+    const parts = [segs.join(" · ")];
     if (parsed.owner !== "me") parts.push(parsed.owner);
     if (parsed.priority !== "low") parts.push(parsed.priority);
     parsed.tags.forEach(t => parts.push(`#${t}`));
-    hint.textContent = parts.join(" · ");
+    hint.textContent = parts.join("   ");
     hint.hidden = false;
+    renderSuggestStrip();
     return;
   }
   const parsed = parseInput(v);
@@ -575,6 +580,7 @@ function handleAddInput(e) {
   hint.textContent = parts.length ? parts.join(" · ") : "";
   hint.hidden = !parts.length;
   highlightDuplicate(parsed.title);
+  hideSuggestStrip();
 }
 
 // ─── filters ───
@@ -1007,23 +1013,30 @@ function subscribeRemoteChanges() {
 // ═══════════════════════════════════════════════════════════════════
 
 // ─── places: parser ───
-function parseCountry(raw) {
-  let country = null;
-  const cleaned = raw.replace(/@([\p{L}\p{N}-]+)/gu, (_, t) => {
-    country = t.toLowerCase().replace(/-/g, " ").trim();
+const LOC_TOKEN_RE = /@([\p{L}\p{N}-]+)(?:\.([\p{L}\p{N}-]+)(?:\.([\p{L}\p{N}-]+))?)?/gu;
+const normalizeLoc = s => s ? s.toLowerCase().replace(/-/g, " ").trim() : "";
+
+function parseLocation(raw) {
+  let country = null, city = "", district = "";
+  const cleaned = raw.replace(LOC_TOKEN_RE, (_, c, ci, d) => {
+    country = normalizeLoc(c);
+    city = normalizeLoc(ci);
+    district = normalizeLoc(d);
     return "";
   });
-  return { cleaned, country };
+  return { cleaned, country, city, district };
 }
 
 function parsePlace(raw) {
   const a = parsePriority(raw);
-  const b = parseCountry(a.cleaned);
+  const b = parseLocation(a.cleaned);
   const c = parseTags(b.cleaned);
   const fallback = state.drillCountry || DEFAULT_COUNTRY;
   return {
     name: c.cleaned.replace(/\s+/g, " ").trim(),
     country: b.country || fallback,
+    city: b.city,
+    district: b.district,
     owner: c.owner,
     priority: a.priority,
     tags: [...new Set(c.tags)],
@@ -1092,7 +1105,8 @@ function sanitizePlace(raw, fallbackOrder) {
   return {
     id: sanitizeString(raw.id, 40) || newId(),
     name, country,
-    city: sanitizeString(raw.city, 100),
+    city: sanitizeString(raw.city, 100).toLowerCase().trim(),
+    district: sanitizeString(raw.district, 100).toLowerCase().trim(),
     address: sanitizeString(raw.address, 500),
     owner: OWNER_VALUES.has(raw.owner) ? raw.owner : "me",
     priority: PRIORITY_VALUES.has(raw.priority) ? raw.priority : "low",
@@ -1119,7 +1133,8 @@ function makePlace(raw) {
     id: newId(),
     name: parsed.name,
     country: parsed.country,
-    city: "",
+    city: parsed.city || "",
+    district: parsed.district || "",
     address: "",
     owner: parsed.owner,
     priority: parsed.priority,
@@ -1200,7 +1215,7 @@ function placesTagsAll() {
   return [...seen].sort();
 }
 
-// ─── places: constellation ───
+// ─── places: country index ───
 function aggregateCountries() {
   const map = new Map();
   state.places.forEach(p => {
@@ -1209,50 +1224,47 @@ function aggregateCountries() {
     e.count++;
     if (p.visitedAt) e.visited++;
   });
-  return [...map.values()].sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
-}
-
-function hashStr(s) {
-  let h = 0;
-  for (let i = 0; i < s.length; i++) h = ((h * 31) + s.charCodeAt(i)) | 0;
-  return Math.abs(h);
-}
-
-function constellationPosition(name) {
-  const h = hashStr(name);
-  return {
-    x: 12 + (h % 76),
-    y: 14 + ((Math.floor(h / 7)) % 72),
-  };
+  const arr = [...map.values()];
+  arr.sort((a, b) => {
+    if (a.name === DEFAULT_COUNTRY) return -1;
+    if (b.name === DEFAULT_COUNTRY) return 1;
+    return b.count - a.count || a.name.localeCompare(b.name);
+  });
+  return arr;
 }
 
 function renderConstellation() {
   document.getElementById("constellation-wrap").hidden = false;
   document.getElementById("country-drill").hidden = true;
-  const wrap = document.getElementById("constellation");
+  const wrap = document.getElementById("country-index");
   const countries = aggregateCountries();
   wrap.replaceChildren();
   document.getElementById("places-empty").hidden = countries.length > 0;
-  countries.forEach(c => wrap.appendChild(buildStar(c)));
+  countries.forEach(c => wrap.appendChild(buildCountryRow(c)));
 }
 
-function buildStar(country) {
+function buildCountryRow(country) {
+  const li = document.createElement("li");
   const btn = document.createElement("button");
   btn.type = "button";
-  btn.className = "star";
-  btn.textContent = country.name;
+  btn.className = "country-row";
+  const name = document.createElement("span");
+  name.className = "country-name";
+  name.textContent = country.name;
   const count = document.createElement("span");
-  count.className = "star-count";
-  count.textContent = country.count;
+  count.className = "country-count";
+  count.textContent = String(country.count);
+  if (country.visited > 0) {
+    const v = document.createElement("span");
+    v.className = "country-count-visited";
+    v.textContent = `· ${country.visited} visited`;
+    count.appendChild(v);
+  }
+  btn.appendChild(name);
   btn.appendChild(count);
-  const pos = constellationPosition(country.name);
-  btn.style.left = `${pos.x}%`;
-  btn.style.top = `${pos.y}%`;
-  const size = 1.05 + Math.min(0.85, Math.log(country.count + 1) * 0.45);
-  btn.style.fontSize = `${size}rem`;
-  if (country.count > 0 && country.visited === country.count) btn.style.opacity = "0.5";
   btn.addEventListener("click", () => drillIn(country.name));
-  return btn;
+  li.appendChild(btn);
+  return li;
 }
 
 // ─── places: country drill ───
@@ -1270,7 +1282,9 @@ function renderCountryDrill() {
   const sorted = sortPlaces(active);
   const listEl = document.getElementById("places-list");
   listEl.replaceChildren();
-  if (state.sort === "grouped") renderGroupedPlaces(listEl, sorted);
+  const cityCount = new Set(active.map(p => p.city).filter(Boolean)).size;
+  if (cityCount >= 2) renderGroupedByCity(listEl, sorted);
+  else if (state.sort === "grouped") renderGroupedPlaces(listEl, sorted);
   else sorted.forEach((p, i) => listEl.appendChild(buildPlaceNode(p, i)));
   document.getElementById("country-empty").hidden = active.length > 0 || archived.length > 0;
   renderPlacesArchive(archived);
@@ -1287,6 +1301,25 @@ function renderGroupedPlaces(listEl, sorted) {
     if (!groups[p].length) return;
     listEl.appendChild(renderGroupHeader(PRIORITY_LABEL[p]));
     groups[p].forEach(place => { listEl.appendChild(buildPlaceNode(place, n)); n++; });
+  });
+}
+
+function renderGroupedByCity(listEl, sorted) {
+  const groups = new Map();
+  sorted.forEach(p => {
+    const k = p.city || "elsewhere";
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(p);
+  });
+  const cityOrder = [...groups.keys()].sort((a, b) => {
+    if (a === "elsewhere") return 1;
+    if (b === "elsewhere") return -1;
+    return groups.get(b).length - groups.get(a).length || a.localeCompare(b);
+  });
+  let n = 0;
+  cityOrder.forEach(city => {
+    listEl.appendChild(renderGroupHeader(`${city}.`));
+    groups.get(city).forEach(p => { listEl.appendChild(buildPlaceNode(p, n)); n++; });
   });
 }
 
@@ -1383,11 +1416,15 @@ function fillPlaceAddress(node, place) {
   const row = node.querySelector(".address-row");
   const link = node.querySelector(".address-link");
   const text = node.querySelector(".address-text");
-  const query = (place.address || `${place.name} ${place.country}`).trim();
+  const localised = [place.address, place.district, place.city, place.country].filter(Boolean).join(", ");
+  const query = (place.address ? localised : `${place.name}, ${[place.district, place.city, place.country].filter(Boolean).join(", ")}`).trim();
   if (!query) { row.hidden = true; return; }
   row.hidden = false;
   link.href = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}`;
-  text.textContent = place.address || "find on maps";
+  const display = place.address
+    || [place.district, place.city].filter(Boolean).join(", ")
+    || "find on maps";
+  text.textContent = display;
 }
 
 function fillPlaceDetail(node, place) {
@@ -1545,6 +1582,100 @@ function handlePlaceAddressBlur(id, el) {
   if (node && place) { fillPlaceAddress(node, place); fillPlaceDetail(node, place); }
 }
 
+// ─── location autocomplete ───
+async function loadLocations() {
+  try {
+    const r = await fetch("assets/locations.json", { cache: "force-cache" });
+    if (!r.ok) return;
+    const data = await r.json();
+    if (Array.isArray(data?.countries) && data.cities) state.locations = data;
+  } catch {}
+}
+
+function partialAtToken(input, cursor) {
+  const before = input.slice(0, cursor);
+  const at = before.lastIndexOf("@");
+  if (at < 0) return null;
+  const head = before.slice(at + 1);
+  if (/\s/.test(head)) return null;
+  const after = input.slice(cursor);
+  const tail = (after.match(/^[^\s]*/) || [""])[0];
+  return { at, full: head + tail, end: cursor + tail.length };
+}
+
+function suggestForToken(partial) {
+  const locs = state.locations || { countries: [], cities: {} };
+  const parts = partial.toLowerCase().split(".");
+  if (parts.length === 1) {
+    const pref = parts[0].replace(/-/g, " ");
+    const pool = locs.countries || [];
+    return (pref ? pool.filter(c => c.startsWith(pref)) : pool).slice(0, 7);
+  }
+  if (parts.length === 2) {
+    const country = parts[0].replace(/-/g, " ");
+    const pref = parts[1].replace(/-/g, " ");
+    const cities = locs.cities?.[country] || [];
+    const matched = pref ? cities.filter(c => c.startsWith(pref)) : cities;
+    return matched.slice(0, 7).map(c => `${country}.${c}`);
+  }
+  return [];
+}
+
+function renderSuggestStrip() {
+  const wrap = document.getElementById("composer-suggest");
+  const input = document.getElementById("add-input");
+  const cursor = input.selectionStart ?? input.value.length;
+  if (state.view !== "places") { hideSuggestStrip(); return; }
+  const partial = partialAtToken(input.value, cursor);
+  if (!partial) { hideSuggestStrip(); return; }
+  const matches = suggestForToken(partial.full);
+  if (!matches.length) { hideSuggestStrip(); return; }
+  wrap.replaceChildren();
+  matches.forEach(m => {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "suggest-chip";
+    chip.textContent = m;
+    chip.tabIndex = 0;
+    const fire = () => insertSuggestion(input, partial, m);
+    chip.addEventListener("mousedown", e => { e.preventDefault(); fire(); });
+    chip.addEventListener("keydown", e => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fire(); }
+      else if (e.key === "Escape") { e.preventDefault(); hideSuggestStrip(); input.focus(); }
+      else if (e.key === "ArrowRight") {
+        e.preventDefault();
+        (chip.nextElementSibling || wrap.firstElementChild)?.focus();
+      }
+      else if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        (chip.previousElementSibling || wrap.lastElementChild)?.focus();
+      }
+    });
+    wrap.appendChild(chip);
+  });
+  wrap.hidden = false;
+}
+
+function hideSuggestStrip() {
+  const wrap = document.getElementById("composer-suggest");
+  wrap.hidden = true;
+  wrap.replaceChildren();
+}
+
+function insertSuggestion(input, partial, suggestion) {
+  const dashed = suggestion.replace(/\s+/g, "-");
+  const before = input.value.slice(0, partial.at);
+  const after = input.value.slice(partial.end);
+  const inserted = "@" + dashed;
+  input.value = before + inserted + after;
+  const cursor = (before + inserted).length;
+  input.focus();
+  input.setSelectionRange(cursor, cursor);
+  renderSuggestStrip();
+  document.getElementById("composer-hint").hidden = true;
+  handleAddInput({ target: input });
+}
+
 // ─── view router ───
 function loadView() {
   const saved = localStorage.getItem(VIEW_KEY);
@@ -1569,6 +1700,7 @@ function applyViewToUi() {
   });
   updateComposerPlaceholder();
   syncSortLabel();
+  hideSuggestStrip();
 }
 
 function updateComposerPlaceholder() {
@@ -1632,6 +1764,7 @@ function showSuggestionForView() {
 function bindEvents() {
   document.getElementById("add-form").addEventListener("submit", handleAddSubmit);
   document.getElementById("add-input").addEventListener("input", handleAddInput);
+  document.getElementById("add-input").addEventListener("keydown", handleComposerKeydown);
   document.getElementById("filters").addEventListener("click", handleFilterClick);
   document.getElementById("places-filters").addEventListener("click", handlePlaceFilterClick);
   bindList();
@@ -1699,6 +1832,16 @@ function handleGlobalKeydown(e) {
   }
 }
 
+function handleComposerKeydown(e) {
+  const wrap = document.getElementById("composer-suggest");
+  if (e.key === "Tab" && !e.shiftKey && !wrap.hidden) {
+    const firstChip = wrap.querySelector(".suggest-chip");
+    if (firstChip) { e.preventDefault(); firstChip.focus(); }
+  } else if (e.key === "Escape") {
+    if (!wrap.hidden) { e.preventDefault(); hideSuggestStrip(); }
+  }
+}
+
 // ─── boot ───
 async function boot() {
   loadPrefs();
@@ -1710,6 +1853,7 @@ async function boot() {
   loadEpigraph();
   bindEpigraph();
   bindEvents();
+  loadLocations();
   await Promise.all([loadItems(), loadPlaces()]);
   render();
   subscribeRemoteChanges();
