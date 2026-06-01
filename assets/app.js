@@ -2057,15 +2057,15 @@ async function handleCardPointerUp(e) {
 async function maybeDropOnDoneZone(e, ds) {
   const doneZoneId = ds.kind === "place" ? "places-archive" : "archive";
   const doneZone = document.getElementById(doneZoneId);
-  if (!doneZone) return false;
-  const dz = doneZone.getBoundingClientRect();
-  const over = e.clientX >= dz.left && e.clientX <= dz.right &&
-               e.clientY >= dz.top && e.clientY <= dz.bottom;
-  if (!over && !doneZone.hidden) return false;
-  // Also accept drag past the bottom of the canvas as "drop on done"
+  let inZone = false;
+  if (doneZone && !doneZone.hidden) {
+    const dz = doneZone.getBoundingClientRect();
+    inZone = e.clientX >= dz.left && e.clientX <= dz.right &&
+             e.clientY >= dz.top - 20 && e.clientY <= dz.bottom + 200;
+  }
   const canvasBottom = ds.canvasTop + ds.canvas.offsetHeight;
-  const dragOverBottom = e.clientY > canvasBottom + 40;
-  if (!over && !dragOverBottom) return false;
+  const pastCanvas = e.clientY > canvasBottom - 10;
+  if (!inZone && !pastCanvas) return false;
   if (ds.kind === "place") await togglePlaceVisited(ds.id);
   else await toggleComplete(ds.id);
   return true;
