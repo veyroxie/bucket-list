@@ -53,20 +53,19 @@
         <span class="tag-chips" id="tag-chips"></span>
       </nav>
 
-      <ol class="list" id="list"></ol>
+      <div class="canvas" id="list"></div>
 
       <div class="empty" id="empty" hidden>
         <p class="empty-headline">the page is blank.</p>
         <p class="empty-hint">try writing <code class="empty-example">read a poem every morning</code> in the field above.</p>
       </div>
 
-      <section class="archive" id="archive" hidden>
-        <button class="archive-toggle" id="archive-toggle" type="button" aria-expanded="false">
-          <span class="archive-chev" aria-hidden="true">›</span>
-          <span class="archive-label">archive</span>
-          <span class="archive-count" id="archive-count"></span>
-        </button>
-        <ol class="list archive-list" id="archive-list" hidden></ol>
+      <section class="done-zone" id="archive" hidden>
+        <div class="done-zone-head">
+          <span class="done-zone-label">done</span>
+          <span class="done-zone-count" id="archive-count">0</span>
+        </div>
+        <div class="done-chips" id="archive-list"></div>
       </section>
     </div>
 
@@ -92,19 +91,18 @@
           <span class="filter-sep" aria-hidden="true"></span>
           <span class="tag-chips" id="places-tag-chips"></span>
         </nav>
-        <ol class="list" id="places-list"></ol>
+        <div class="canvas" id="places-list"></div>
         <div class="empty" id="country-empty" hidden>
           <p class="empty-headline">nothing matches.</p>
           <p class="empty-hint">try clearing a filter above, or add something new.</p>
         </div>
 
-        <section class="archive" id="places-archive" hidden>
-          <button class="archive-toggle" id="places-archive-toggle" type="button" aria-expanded="false">
-            <span class="archive-chev" aria-hidden="true">›</span>
-            <span class="archive-label">visited</span>
-            <span class="archive-count" id="places-archive-count"></span>
-          </button>
-          <ol class="list archive-list" id="places-archive-list" hidden></ol>
+        <section class="done-zone" id="places-archive" hidden>
+          <div class="done-zone-head">
+            <span class="done-zone-label">visited</span>
+            <span class="done-zone-count" id="places-archive-count">0</span>
+          </div>
+          <div class="done-chips" id="places-archive-list"></div>
         </section>
       </div>
     </div>
@@ -120,7 +118,7 @@
       <div class="actions">
         <button class="link" id="today-link" type="button">consider one for today</button>
         <span class="sep" aria-hidden="true">·</span>
-        <button class="link" id="sort-link" type="button">grouped</button>
+        <button class="link" id="sort-link" type="button">tidy</button>
         <span class="sep" aria-hidden="true">·</span>
         <button class="link" id="export-link" type="button">export</button>
         <span class="sep" aria-hidden="true">·</span>
@@ -148,94 +146,37 @@
     </footer>
   </main>
 
-  <template id="item-template">
-    <li class="item" draggable="true">
-      <span class="margin-left">
-        <span class="number"></span>
-        <span class="marginalia"></span>
-      </span>
+  <template id="card-template">
+    <div class="card" data-id="">
       <span class="priority-pip" aria-hidden="true"></span>
-      <div class="body">
-        <div class="head">
-          <span class="title" contenteditable="true" spellcheck="false" role="textbox" aria-multiline="false" aria-label="goal title"></span>
-          <button class="expand" type="button" aria-label="expand">
-            <svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true"><path d="M3 4.5 L6 7.5 L9 4.5" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          </button>
-          <button class="check" type="button" aria-label="mark complete">
-            <svg viewBox="0 0 22 22" width="22" height="22" aria-hidden="true">
-              <circle class="check-ring" cx="11" cy="11" r="9" fill="none" stroke="currentColor" stroke-width="1"/>
-              <path class="check-mark" d="M6.5 11.5 L9.5 14.5 L15.5 7.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
-            </svg>
-          </button>
-        </div>
-        <div class="meta">
-          <span class="owner"></span>
-          <span class="tag-list"></span>
-        </div>
-        <div class="detail" hidden>
-          <textarea class="notes" rows="2" placeholder="a longer note, if you like."></textarea>
-          <input class="cover-url" type="url" placeholder="cover image url (optional)">
-          <div class="cover" hidden></div>
-          <input class="reflection" type="text" placeholder="a line about how it was?" hidden>
-          <p class="reflection-shown" hidden></p>
-          <div class="row-actions">
-            <button class="link priority-cycle" type="button">priority</button>
-            <span class="sep" aria-hidden="true">·</span>
-            <button class="link owner-cycle" type="button">whose</button>
-            <span class="sep" aria-hidden="true">·</span>
-            <button class="link delete" type="button">delete</button>
-          </div>
-        </div>
+      <button class="delete-x" type="button" aria-label="delete">×</button>
+      <span class="title" contenteditable="true" spellcheck="false" role="textbox" aria-multiline="false" aria-label="title"></span>
+      <div class="meta">
+        <span class="owner"></span>
+        <span class="tag-list"></span>
       </div>
-    </li>
+    </div>
   </template>
 
-  <template id="place-template">
-    <li class="item place-item" draggable="true">
-      <span class="margin-left">
-        <span class="number"></span>
-        <span class="marginalia"></span>
-      </span>
+  <template id="place-card-template">
+    <div class="card place-card" data-id="">
       <span class="priority-pip" aria-hidden="true"></span>
-      <div class="body">
-        <div class="head">
-          <span class="title" contenteditable="true" spellcheck="false" role="textbox" aria-multiline="false" aria-label="place name"></span>
-          <button class="expand" type="button" aria-label="expand">
-            <svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true"><path d="M3 4.5 L6 7.5 L9 4.5" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          </button>
-          <button class="check" type="button" aria-label="mark visited">
-            <svg viewBox="0 0 22 22" width="22" height="22" aria-hidden="true">
-              <circle class="check-ring" cx="11" cy="11" r="9" fill="none" stroke="currentColor" stroke-width="1"/>
-              <path class="check-mark" d="M6.5 11.5 L9.5 14.5 L15.5 7.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
-            </svg>
-          </button>
-        </div>
-        <p class="address-row">
-          <a class="address-link" target="_blank" rel="noopener noreferrer"><span class="address-arrow" aria-hidden="true">↗</span><span class="address-text"></span></a>
-        </p>
-        <div class="meta">
-          <span class="owner"></span>
-          <span class="tag-list"></span>
-        </div>
-        <div class="detail" hidden>
-          <input class="address-input" type="text" placeholder="address (paste from maps)">
-          <textarea class="notes" rows="2" placeholder="a longer note, if you like."></textarea>
-          <input class="cover-url" type="url" placeholder="cover image url (optional)">
-          <div class="cover" hidden></div>
-          <input class="reflection" type="text" placeholder="how was it?" hidden>
-          <p class="reflection-shown" hidden></p>
-          <div class="row-actions">
-            <button class="link priority-cycle" type="button">priority</button>
-            <span class="sep" aria-hidden="true">·</span>
-            <button class="link owner-cycle" type="button">whose</button>
-            <span class="sep" aria-hidden="true">·</span>
-            <button class="link country-cycle" type="button">move country</button>
-            <span class="sep" aria-hidden="true">·</span>
-            <button class="link delete" type="button">delete</button>
-          </div>
-        </div>
+      <button class="delete-x" type="button" aria-label="delete">×</button>
+      <span class="title" contenteditable="true" spellcheck="false" role="textbox" aria-multiline="false" aria-label="place name"></span>
+      <p class="address-row">
+        <a class="address-link" target="_blank" rel="noopener noreferrer"><span class="address-arrow" aria-hidden="true">↗</span><span class="address-text"></span></a>
+      </p>
+      <div class="meta">
+        <span class="owner"></span>
+        <span class="tag-list"></span>
       </div>
-    </li>
+    </div>
+  </template>
+
+  <template id="chip-template">
+    <button type="button" class="done-chip" data-id="">
+      <span class="chip-title"></span>
+    </button>
   </template>
 
   <script src="assets/config.js" defer></script>

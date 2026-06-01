@@ -190,8 +190,13 @@ function sanitizeItem(raw, fallbackOrder) {
     completedAt: typeof raw.completedAt === "string" ? raw.completedAt : null,
     createdAt: typeof raw.createdAt === "string" ? raw.createdAt : new Date().toISOString(),
     order: typeof raw.order === "number" ? raw.order : fallbackOrder,
+    x: typeof raw.x === "number" ? clampX(raw.x) : null,
+    y: typeof raw.y === "number" ? clampY(raw.y) : null,
   };
 }
+
+function clampX(n) { return Math.max(0, Math.min(420, n)); }
+function clampY(n) { return Math.max(0, Math.min(9000, n)); }
 
 function sanitizeItems(raw) {
   if (!Array.isArray(raw)) return [];
@@ -202,6 +207,7 @@ function sanitizeItems(raw) {
 function makeItem(raw) {
   const parsed = parseInput(raw);
   if (!parsed.title) return null;
+  const pos = autoPositionFor(state.items);
   return {
     id: newId(),
     title: parsed.title,
@@ -214,6 +220,8 @@ function makeItem(raw) {
     completedAt: null,
     createdAt: new Date().toISOString(),
     order: state.items.length,
+    x: pos.x,
+    y: pos.y,
   };
 }
 
@@ -387,33 +395,126 @@ function renderGroupHeader(label) {
   return h;
 }
 
+// ─── canvas + done-zone rendering ───
+const CARD_W = 220;
+const CARD_H = 110;
+const COL_STEP = 240;
+const ROW_STEP = 130;
+
+function autoPositionFor(existing) {
+  const placed = existing.filter(it => it.x != null && it.y != null);
+  for (let y = 8; y <= 3000; y += ROW_STEP) {
+    for (let x = 10; x <= 420; x += COL_STEP) {
+      if (!collidesAt(x, y, placed)) return { x, y };
+    }
+  }
+  return { x: 10, y: 3000 + Math.random() * 200 };
+}
+
+function collidesAt(x, y, items) {
+  return items.some(it =>
+    Math.abs(it.x - x) < CARD_W - 20 && Math.abs(it.y - y) < CARD_H - 10
+  );
+}
+
+function ensureItemPositions() {
+  state.items.forEach(item => {
+    if (item.x == null || item.y == null) {
+      const pos = autoPositionFor(state.items);
+      item.x = pos.x;
+      item.y = pos.y;
+    }
+  });
+}
+
+function ensurePlacePositionsForCountry(country) {
+  state.places.filter(p => p.country === country).forEach(place => {
+    if (place.x == null || place.y == null) {
+      const pos = autoPositionFor(state.places.filter(p => p.country === country));
+      place.x = pos.x;
+      place.y = pos.y;
+    }
+  });
+}
+
 function renderList() {
-  const listEl = document.getElementById("list");
+  ensureItemPositions();
+  const canvas = document.getElementById("list");
   const visible = state.items.filter(isItemVisible);
   const active = visible.filter(i => !i.completedAt);
   const archived = visible.filter(i => i.completedAt);
-  const sorted = sortItems(active);
-  document.getElementById("empty").hidden = state.items.length > 0 || archived.length > 0;
-  listEl.innerHTML = "";
-  if (state.sort === "grouped") renderGrouped(listEl, sorted);
-  else sorted.forEach((item, i) => listEl.appendChild(buildItemNode(item, i)));
-  renderArchive(archived);
+  document.getElementById("empty").hidden = state.items.length > 0;
+  canvas.replaceChildren();
+  active.forEach(item => canvas.appendChild(buildCardNode(item, "item")));
+  growCanvas(canvas, active);
+  renderItemsDoneZone(archived);
 }
 
-function renderArchive(archived) {
+function renderItemsDoneZone(archived) {
   const wrap = document.getElementById("archive");
   const listEl = document.getElementById("archive-list");
-  const toggle = document.getElementById("archive-toggle");
   listEl.replaceChildren();
   if (!archived.length) { wrap.hidden = true; return; }
   wrap.hidden = false;
   document.getElementById("archive-count").textContent = String(archived.length);
-  toggle.setAttribute("aria-expanded", String(state.archiveOpen));
-  listEl.hidden = !state.archiveOpen;
   const ordered = archived.slice().sort((a, b) =>
     (b.completedAt ?? "").localeCompare(a.completedAt ?? "")
   );
-  ordered.forEach((item, i) => listEl.appendChild(buildItemNode(item, i)));
+  ordered.forEach(item => listEl.appendChild(buildChipNode(item, "item")));
+}
+
+function growCanvas(canvas, items) {
+  if (!items.length) { canvas.style.minHeight = "60vh"; return; }
+  const maxY = Math.max(...items.map(i => i.y ?? 0));
+  canvas.style.minHeight = Math.max(480, maxY + CARD_H + 40) + "px";
+}
+
+function buildCardNode(item, kind) {
+  const tmplId = kind === "place" ? "place-card-template" : "card-template";
+  const tmpl = document.getElementById(tmplId);
+  const node = tmpl.content.firstElementChild.cloneNode(true);
+  fillCardNode(node, item, kind);
+  const lastIds = kind === "place" ? state.placesLastRenderIds : state.lastRenderIds;
+  if (!lastIds.has(item.id)) node.classList.add("is-entering");
+  if (!canEdit()) node.style.cursor = "default";
+  return node;
+}
+
+function fillCardNode(node, item, kind) {
+  node.dataset.id = item.id;
+  node.dataset.priority = item.priority;
+  node.dataset.owner = item.owner;
+  node.dataset.kind = kind;
+  node.style.left = (item.x ?? 10) + "px";
+  node.style.top = (item.y ?? 10) + "px";
+  const titleEl = node.querySelector(".title");
+  titleEl.textContent = kind === "place" ? item.name : item.title;
+  titleEl.contentEditable = canEdit() ? "true" : "false";
+  node.querySelector(".owner").textContent = item.owner;
+  renderTagsInto(node.querySelector(".tag-list"), item.tags);
+  if (kind === "place") fillPlaceCardAddress(node, item);
+}
+
+function fillPlaceCardAddress(node, place) {
+  const row = node.querySelector(".address-row");
+  const link = node.querySelector(".address-link");
+  const text = node.querySelector(".address-text");
+  const localised = [place.address, place.district, place.city, place.country].filter(Boolean).join(", ");
+  const query = (place.address ? localised : `${place.name}, ${[place.district, place.city, place.country].filter(Boolean).join(", ")}`).trim();
+  if (!query) { row.hidden = true; return; }
+  row.hidden = false;
+  link.href = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}`;
+  text.textContent = [place.district, place.city].filter(Boolean).join(", ") || "find on maps";
+}
+
+function buildChipNode(item, kind) {
+  const tmpl = document.getElementById("chip-template");
+  const node = tmpl.content.firstElementChild.cloneNode(true);
+  node.dataset.id = item.id;
+  node.dataset.kind = kind;
+  const label = kind === "place" ? item.name : item.title;
+  node.querySelector(".chip-title").textContent = label;
+  return node;
 }
 
 function renderGrouped(listEl, sorted) {
@@ -609,16 +710,12 @@ function handleListClick(e) {
   const item = e.target.closest(".item");
   if (!item) return;
   const id = item.dataset.id;
+  if (e.target.closest(".delete-x")) return softDeleteItem(id);
   if (e.target.closest(".check")) return handleCheck(id);
   if (e.target.closest(".expand")) return handleExpand(id);
-  if (e.target.closest(".delete")) return handleDelete(id);
+  if (e.target.closest(".delete")) return softDeleteItem(id);
   if (e.target.closest(".priority-cycle")) return handlePriorityCycle(id);
   if (e.target.closest(".owner-cycle")) return handleOwnerCycle(id);
-}
-
-function handleDelete(id) {
-  if (!canEdit()) return;
-  deleteItem(id);
 }
 
 function handleCheck(id) {
@@ -808,15 +905,30 @@ const SORT_LABELS = {
 };
 
 function syncSortLabel() {
-  document.getElementById("sort-link").textContent = SORT_LABELS[state.sort] ?? "grouped";
+  document.getElementById("sort-link").textContent = "tidy";
 }
 
-function cycleSort() {
-  const i = SORT_MODES.indexOf(state.sort);
-  state.sort = SORT_MODES[(i + 1) % SORT_MODES.length];
-  syncSortLabel();
-  savePrefs();
+async function tidyLayout() {
+  if (!canEdit()) return;
+  if (state.view === "places" && state.drillCountry) {
+    const places = state.places.filter(p => p.country === state.drillCountry && !p.visitedAt);
+    layoutInGrid(places);
+    await savePlaces();
+  } else if (state.view === "list") {
+    const items = state.items.filter(i => !i.completedAt);
+    layoutInGrid(items);
+    await save();
+  }
   render();
+}
+
+function layoutInGrid(items) {
+  items.forEach((item, i) => {
+    const col = i % 2;
+    const row = Math.floor(i / 2);
+    item.x = 10 + col * COL_STEP;
+    item.y = 10 + row * ROW_STEP;
+  });
 }
 
 // ─── prefs ───
@@ -845,14 +957,75 @@ function savePrefs() {
 
 // ─── inline status messages ───
 let statusTimer = null;
-function showStatus(text) {
+function showStatus(text, action) {
   const el = document.getElementById("status-line");
   if (!el) return;
-  el.textContent = text;
+  el.replaceChildren();
+  el.append(document.createTextNode(text));
+  if (action) {
+    el.append(document.createTextNode(" — "));
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "status-action";
+    btn.textContent = action.label;
+    btn.addEventListener("click", () => { hideStatus(); action.onClick(); });
+    el.append(btn);
+  }
   el.hidden = false;
   if (statusTimer) clearTimeout(statusTimer);
-  statusTimer = setTimeout(() => { el.hidden = true; }, 3000);
+  statusTimer = setTimeout(() => { el.hidden = true; }, action ? 6000 : 3000);
 }
+
+function hideStatus() {
+  const el = document.getElementById("status-line");
+  if (el) el.hidden = true;
+  if (statusTimer) clearTimeout(statusTimer);
+}
+
+// ─── soft delete + undo ───
+async function softDeleteItem(id) {
+  if (!canEdit()) return;
+  const idx = state.items.findIndex(i => i.id === id);
+  if (idx < 0) return;
+  const [removed] = state.items.splice(idx, 1);
+  state.expanded.delete(id);
+  await save();
+  render();
+  showStatus(`deleted "${trunc(removed.title, 40)}"`, {
+    label: "undo",
+    onClick: () => undoItemDelete(removed, idx),
+  });
+}
+
+async function undoItemDelete(item, idx) {
+  state.items.splice(Math.min(idx, state.items.length), 0, item);
+  state.items.forEach((it, i) => { it.order = i; });
+  await save();
+  render();
+}
+
+async function softDeletePlace(id) {
+  if (!canEdit()) return;
+  const idx = state.places.findIndex(p => p.id === id);
+  if (idx < 0) return;
+  const [removed] = state.places.splice(idx, 1);
+  state.placesExpanded.delete(id);
+  await savePlaces();
+  render();
+  showStatus(`deleted "${trunc(removed.name, 40)}"`, {
+    label: "undo",
+    onClick: () => undoPlaceDelete(removed, idx),
+  });
+}
+
+async function undoPlaceDelete(place, idx) {
+  state.places.splice(Math.min(idx, state.places.length), 0, place);
+  state.places.forEach((p, i) => { p.order = i; });
+  await savePlaces();
+  render();
+}
+
+function trunc(s, n) { return s.length > n ? s.slice(0, n - 1) + "…" : s; }
 
 // ─── export / import ───
 function downloadJson() {
@@ -1117,6 +1290,8 @@ function sanitizePlace(raw, fallbackOrder) {
     visitedAt: typeof raw.visitedAt === "string" ? raw.visitedAt : null,
     createdAt: typeof raw.createdAt === "string" ? raw.createdAt : new Date().toISOString(),
     order: typeof raw.order === "number" ? raw.order : fallbackOrder,
+    x: typeof raw.x === "number" ? clampX(raw.x) : null,
+    y: typeof raw.y === "number" ? clampY(raw.y) : null,
   };
 }
 
@@ -1129,6 +1304,7 @@ function sanitizePlaces(raw) {
 function makePlace(raw) {
   const parsed = parsePlace(raw);
   if (!parsed.name) return null;
+  const pos = autoPositionFor(state.places.filter(p => p.country === parsed.country));
   return {
     id: newId(),
     name: parsed.name,
@@ -1145,6 +1321,8 @@ function makePlace(raw) {
     visitedAt: null,
     createdAt: new Date().toISOString(),
     order: state.places.length,
+    x: pos.x,
+    y: pos.y,
   };
 }
 
@@ -1272,6 +1450,7 @@ function renderCountryDrill() {
   document.getElementById("constellation-wrap").hidden = true;
   document.getElementById("country-drill").hidden = false;
   const country = state.drillCountry;
+  ensurePlacePositionsForCountry(country);
   const all = state.places.filter(p => p.country === country);
   document.getElementById("country-title").textContent = `${country}.`;
   document.getElementById("country-meta").textContent =
@@ -1279,18 +1458,28 @@ function renderCountryDrill() {
   const visible = all.filter(isPlaceVisible);
   const active = visible.filter(p => !p.visitedAt);
   const archived = visible.filter(p => p.visitedAt);
-  const sorted = sortPlaces(active);
-  const listEl = document.getElementById("places-list");
-  listEl.replaceChildren();
-  const cityCount = new Set(active.map(p => p.city).filter(Boolean)).size;
-  if (cityCount >= 2) renderGroupedByCity(listEl, sorted);
-  else if (state.sort === "grouped") renderGroupedPlaces(listEl, sorted);
-  else sorted.forEach((p, i) => listEl.appendChild(buildPlaceNode(p, i)));
+  const canvas = document.getElementById("places-list");
+  canvas.replaceChildren();
+  active.forEach(p => canvas.appendChild(buildCardNode(p, "place")));
+  growCanvas(canvas, active);
   document.getElementById("country-empty").hidden = active.length > 0 || archived.length > 0;
-  renderPlacesArchive(archived);
+  renderPlacesDoneZone(archived);
   renderPlacesTagChips();
   syncPlacesActiveChip();
   state.placesLastRenderIds = new Set(state.places.map(p => p.id));
+}
+
+function renderPlacesDoneZone(archived) {
+  const wrap = document.getElementById("places-archive");
+  const listEl = document.getElementById("places-archive-list");
+  listEl.replaceChildren();
+  if (!archived.length) { wrap.hidden = true; return; }
+  wrap.hidden = false;
+  document.getElementById("places-archive-count").textContent = String(archived.length);
+  const ordered = archived.slice().sort((a, b) =>
+    (b.visitedAt ?? "").localeCompare(a.visitedAt ?? "")
+  );
+  ordered.forEach(p => listEl.appendChild(buildChipNode(p, "place")));
 }
 
 function renderGroupedPlaces(listEl, sorted) {
@@ -1467,9 +1656,10 @@ function handlePlacesClick(e) {
   const item = e.target.closest(".item");
   if (!item) return;
   const id = item.dataset.id;
+  if (e.target.closest(".delete-x")) return softDeletePlace(id);
   if (e.target.closest(".check")) return handlePlaceVisit(id);
   if (e.target.closest(".expand")) return handlePlaceExpand(id);
-  if (e.target.closest(".delete")) return handlePlaceDelete(id);
+  if (e.target.closest(".delete")) return softDeletePlace(id);
   if (e.target.closest(".priority-cycle")) return handlePlacePriorityCycle(id);
   if (e.target.closest(".owner-cycle")) return handlePlaceOwnerCycle(id);
   if (e.target.closest(".country-cycle")) return handlePlaceCountryCycle(id);
@@ -1483,7 +1673,6 @@ function handlePlaceExpand(id) {
   render();
 }
 
-function handlePlaceDelete(id) { if (canEdit()) deletePlace(id); }
 
 async function handlePlacePriorityCycle(id) {
   if (!canEdit()) return;
@@ -1768,9 +1957,8 @@ function bindEvents() {
   document.getElementById("filters").addEventListener("click", handleFilterClick);
   document.getElementById("places-filters").addEventListener("click", handlePlaceFilterClick);
   bindList();
-  bindPlacesList();
   document.getElementById("today-link").addEventListener("click", showSuggestionForView);
-  document.getElementById("sort-link").addEventListener("click", cycleSort);
+  document.getElementById("sort-link").addEventListener("click", tidyLayout);
   document.getElementById("export-link").addEventListener("click", downloadJson);
   document.getElementById("import-link").addEventListener("click", () => document.getElementById("import-file").click());
   document.getElementById("import-file").addEventListener("change", handleImportFile);
@@ -1782,39 +1970,172 @@ function bindEvents() {
     if (tab) switchView(tab.dataset.view);
   });
   document.getElementById("drill-back").addEventListener("click", drillOut);
-  document.getElementById("archive-toggle").addEventListener("click", toggleArchive);
-  document.getElementById("places-archive-toggle").addEventListener("click", togglePlacesArchive);
   document.addEventListener("keydown", handleGlobalKeydown);
   window.addEventListener("beforeunload", () => { flushPendingSave(); flushPendingSavePlaces(); });
 }
 
-function bindPlacesList() {
-  const lists = ["places-list", "places-archive-list"];
-  lists.forEach(id => {
-    const el = document.getElementById(id);
-    if (!el) return;
-    el.addEventListener("click", handlePlacesClick);
-    el.addEventListener("blur", handlePlaceInlineBlur, true);
-    el.addEventListener("input", handlePlaceInlineInput, true);
-    el.addEventListener("keydown", handleInlineKeydown, true);
-    el.addEventListener("paste", handlePaste, true);
-  });
+// ─── canvas: pointer drag + click ───
+let dragState = null;
+
+function handleCardPointerDown(e) {
+  if (!canEdit()) return;
+  if (e.target.closest(".delete-x, button, input, textarea, a, .tag")) return;
+  const card = e.target.closest(".card");
+  if (!card) return;
+  // If the title is already focused (user is editing) — don't hijack
+  const titleEl = card.querySelector(".title");
+  if (titleEl && document.activeElement === titleEl) return;
+  const rect = card.getBoundingClientRect();
+  const canvas = card.parentElement;
+  const canvasRect = canvas.getBoundingClientRect();
+  dragState = {
+    id: card.dataset.id, kind: card.dataset.kind, card, canvas,
+    offsetX: e.clientX - rect.left,
+    offsetY: e.clientY - rect.top,
+    canvasLeft: canvasRect.left,
+    canvasTop: canvasRect.top,
+    moved: false,
+    startX: e.clientX,
+    startY: e.clientY,
+    pointerId: e.pointerId,
+  };
+  document.addEventListener("pointermove", handleCardPointerMove);
+  document.addEventListener("pointerup", handleCardPointerUp);
+  document.addEventListener("pointercancel", handleCardPointerUp);
 }
 
+function handleCardPointerMove(e) {
+  if (!dragState) return;
+  const dx = e.clientX - dragState.startX;
+  const dy = e.clientY - dragState.startY;
+  if (!dragState.moved && Math.hypot(dx, dy) < 6) return;
+  if (!dragState.moved) {
+    dragState.moved = true;
+    dragState.card.classList.add("is-dragging");
+    try { dragState.card.setPointerCapture(dragState.pointerId); } catch {}
+    window.getSelection()?.removeAllRanges();
+    e.preventDefault();
+  }
+  const x = e.clientX - dragState.canvasLeft - dragState.offsetX;
+  const y = e.clientY - dragState.canvasTop - dragState.offsetY;
+  dragState.card.style.left = x + "px";
+  dragState.card.style.top = y + "px";
+  highlightDoneZoneIfOver(e, dragState.kind);
+}
+
+function highlightDoneZoneIfOver(e, kind) {
+  const doneZoneId = kind === "place" ? "places-archive" : "archive";
+  const doneZone = document.getElementById(doneZoneId);
+  if (!doneZone || doneZone.hidden) return;
+  const dz = doneZone.getBoundingClientRect();
+  const over = e.clientX >= dz.left && e.clientX <= dz.right &&
+               e.clientY >= dz.top && e.clientY <= dz.bottom;
+  doneZone.classList.toggle("is-target", over);
+}
+
+async function handleCardPointerUp(e) {
+  if (!dragState) return;
+  const ds = dragState;
+  dragState = null;
+  document.removeEventListener("pointermove", handleCardPointerMove);
+  document.removeEventListener("pointerup", handleCardPointerUp);
+  document.removeEventListener("pointercancel", handleCardPointerUp);
+  ds.card.classList.remove("is-dragging");
+  document.querySelectorAll(".done-zone.is-target").forEach(el => el.classList.remove("is-target"));
+  if (!ds.moved) return;
+  if (await maybeDropOnDoneZone(e, ds)) return;
+  const x = clampX(e.clientX - ds.canvasLeft - ds.offsetX);
+  const y = clampY(e.clientY - ds.canvasTop - ds.offsetY);
+  if (ds.kind === "place") {
+    await updatePlace(ds.id, { x, y });
+  } else {
+    await updateItem(ds.id, { x, y });
+  }
+  growCanvas(ds.canvas, ds.kind === "place" ? state.places.filter(p => p.country === state.drillCountry && !p.visitedAt) : state.items.filter(i => !i.completedAt));
+}
+
+async function maybeDropOnDoneZone(e, ds) {
+  const doneZoneId = ds.kind === "place" ? "places-archive" : "archive";
+  const doneZone = document.getElementById(doneZoneId);
+  if (!doneZone) return false;
+  const dz = doneZone.getBoundingClientRect();
+  const over = e.clientX >= dz.left && e.clientX <= dz.right &&
+               e.clientY >= dz.top && e.clientY <= dz.bottom;
+  if (!over && !doneZone.hidden) return false;
+  // Also accept drag past the bottom of the canvas as "drop on done"
+  const canvasBottom = ds.canvasTop + ds.canvas.offsetHeight;
+  const dragOverBottom = e.clientY > canvasBottom + 40;
+  if (!over && !dragOverBottom) return false;
+  if (ds.kind === "place") await togglePlaceVisited(ds.id);
+  else await toggleComplete(ds.id);
+  return true;
+}
+
+function handleCardClick(e) {
+  if (e.target.closest(".address-link")) return;
+  const tagBtn = e.target.closest(".tag");
+  if (tagBtn?.dataset.tag) {
+    const card = e.target.closest(".card");
+    const kind = card?.dataset?.kind;
+    if (kind === "place") filterPlaceByTag(tagBtn.dataset.tag);
+    else filterByTag(tagBtn.dataset.tag);
+    return;
+  }
+  if (!e.target.closest(".delete-x")) return;
+  const card = e.target.closest(".card");
+  if (!card) return;
+  if (card.dataset.kind === "place") softDeletePlace(card.dataset.id);
+  else softDeleteItem(card.dataset.id);
+}
+
+function handleCardBlur(e) {
+  if (!e.target.classList.contains("title")) return;
+  const card = e.target.closest(".card");
+  if (!card) return;
+  if (card.dataset.kind === "place") savePlaceName(card.dataset.id, e.target);
+  else saveTitle(card.dataset.id, e.target);
+}
+
+function handleCardInput(e) {
+  if (!canEdit()) return;
+  if (!e.target.classList.contains("title")) return;
+  const card = e.target.closest(".card");
+  if (!card) return;
+  const next = sanitizeString(e.target.textContent, 280).replace(/\s+/g, " ").trim();
+  if (!next) return;
+  if (card.dataset.kind === "place") updatePlace(card.dataset.id, { name: next });
+  else updateItem(card.dataset.id, { title: next });
+}
+
+async function handleChipClick(e) {
+  if (!canEdit()) return;
+  const chip = e.target.closest(".done-chip");
+  if (!chip) return;
+  if (chip.dataset.kind === "place") await togglePlaceVisited(chip.dataset.id);
+  else await toggleComplete(chip.dataset.id);
+}
+
+// ─── wiring ───
 function bindList() {
-  ["list", "archive-list"].forEach(id => bindOneItemList(id));
+  ["list", "places-list"].forEach(id => bindCanvas(id));
+  ["archive-list", "places-archive-list"].forEach(id => bindDoneList(id));
 }
 
-function bindOneItemList(id) {
-  const list = document.getElementById(id);
-  if (!list) return;
-  list.addEventListener("click", handleListClick);
-  list.addEventListener("dragstart", handleDragStart);
-  list.addEventListener("dragover", handleDragOver);
-  list.addEventListener("drop", handleDrop);
-  list.addEventListener("dragend", cleanupDrag);
-  list.addEventListener("paste", handlePaste, true);
-  bindInlineEdits(list);
+function bindCanvas(id) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.addEventListener("pointerdown", handleCardPointerDown);
+  el.addEventListener("click", handleCardClick);
+  el.addEventListener("blur", handleCardBlur, true);
+  el.addEventListener("input", handleCardInput, true);
+  el.addEventListener("keydown", handleInlineKeydown, true);
+  el.addEventListener("paste", handlePaste, true);
+}
+
+function bindDoneList(id) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.addEventListener("click", handleChipClick);
 }
 
 function handlePaste(e) {
