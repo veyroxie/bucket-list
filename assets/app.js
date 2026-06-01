@@ -196,7 +196,7 @@ function sanitizeItem(raw, fallbackOrder) {
 }
 
 function clampX(n) { return Math.max(0, Math.min(420, n)); }
-function clampY(n) { return Math.max(0, Math.min(9000, n)); }
+function clampY(n) { return Math.max(0, Math.min(CANVAS_MAX_Y, n)); }
 
 function sanitizeItems(raw) {
   if (!Array.isArray(raw)) return [];
@@ -400,15 +400,16 @@ const CARD_W = 220;
 const CARD_H = 110;
 const COL_STEP = 240;
 const ROW_STEP = 130;
+const CANVAS_MAX_Y = 600;
 
 function autoPositionFor(existing) {
   const placed = existing.filter(it => it.x != null && it.y != null);
-  for (let y = 8; y <= 3000; y += ROW_STEP) {
+  for (let y = 8; y <= CANVAS_MAX_Y; y += ROW_STEP) {
     for (let x = 10; x <= 420; x += COL_STEP) {
       if (!collidesAt(x, y, placed)) return { x, y };
     }
   }
-  return { x: 10, y: 3000 + Math.random() * 200 };
+  return { x: 10 + Math.random() * 240, y: 10 + Math.random() * CANVAS_MAX_Y };
 }
 
 function collidesAt(x, y, items) {
@@ -464,9 +465,11 @@ function renderItemsDoneZone(archived) {
 }
 
 function growCanvas(canvas, items) {
-  if (!items.length) { canvas.style.minHeight = "60vh"; return; }
+  const maxAllowed = CANVAS_MAX_Y + CARD_H + 40;
+  if (!items.length) { canvas.style.minHeight = "480px"; return; }
   const maxY = Math.max(...items.map(i => i.y ?? 0));
-  canvas.style.minHeight = Math.max(480, maxY + CARD_H + 40) + "px";
+  const wanted = Math.max(480, Math.min(maxY + CARD_H + 40, maxAllowed));
+  canvas.style.minHeight = wanted + "px";
 }
 
 function buildCardNode(item, kind) {
