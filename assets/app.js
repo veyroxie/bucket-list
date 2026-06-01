@@ -1130,16 +1130,22 @@ async function handleGateSubmit(e) {
   const input = document.getElementById("gate-input");
   const err = document.getElementById("gate-error");
   err.hidden = true;
-  const { error } = await state.supabase.auth.signInWithPassword({
-    email: cfg.sharedEmail,
-    password: input.value,
-  });
-  if (error) { err.hidden = false; input.select(); return; }
+  const emails = Array.isArray(cfg.sharedEmails) && cfg.sharedEmails.length
+    ? cfg.sharedEmails
+    : (cfg.sharedEmail ? [cfg.sharedEmail] : []);
+  let signedIn = false;
+  for (const email of emails) {
+    const { error } = await state.supabase.auth.signInWithPassword({
+      email, password: input.value,
+    });
+    if (!error) { signedIn = true; break; }
+  }
+  if (!signedIn) { err.hidden = false; input.select(); return; }
   document.getElementById("gate-form").hidden = true;
   input.value = "";
   state.editMode = "edit";
   applyEditModeUi();
-  await loadItems();
+  await Promise.all([loadItems(), loadPlaces()]);
   render();
 }
 
